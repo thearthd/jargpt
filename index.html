@@ -1,9 +1,9 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
   <title>JAR GPT</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     :root{
       --bg:#343541;
@@ -80,6 +80,7 @@
       white-space:pre-wrap;
       line-height:1.55;
       position:relative;
+      word-break:break-word;
     }
     .msg.user .bubble{background:var(--user);}
     .msg.bot  .bubble{background:var(--bot);}
@@ -95,9 +96,9 @@
     pre{
       background:#1e1e1e;
       padding:14px 16px;border-radius:8px;overflow-x:auto;
-      position:relative;
+      position:relative;margin:8px 0;
     }
-    pre code{background:none;padding:0;}
+    pre code{background:none;padding:0;font-family:monospace;}
     .copy{
       position:absolute;top:6px;right:6px;
       background:rgba(255,255,255,.12);color:#fff;
@@ -141,6 +142,10 @@
     }
     #inputArea button:disabled{opacity:.45;cursor:not-allowed;}
     .hint{color:var(--subtle);font-size:12px;margin-top:6px;text-align:center;}
+    .toolbar{
+      display:flex;gap:8px;align-items:center;
+    }
+    .small{font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,.06);background:transparent;color:var(--subtle);cursor:pointer;}
   </style>
 </head>
 <body>
@@ -150,10 +155,17 @@
       <div>RPM: <span id="rpm">— / 15</span></div>
       <div>RPD: <span id="rpd">— / 200</span></div>
     </div>
-    <form id="apiKeyForm">
-      <input type="password" id="apiKeyInput" placeholder="Enter API Key" />
-      <button type="submit">Save</button>
-    </form>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <form id="apiKeyForm">
+        <input type="password" id="apiKeyInput" placeholder="Enter API Key" />
+        <button type="submit">Save</button>
+      </form>
+      <div class="toolbar">
+        <button id="clearHistory" class="small" title="Clear local chat history">Clear</button>
+        <button id="exportHistory" class="small" title="Export chat JSON">Export</button>
+        <button id="importHistoryBtn" class="small" title="Import chat JSON">Import</button>
+      </div>
+    </div>
   </header>
 
   <main id="chat"></main>
@@ -170,27 +182,15 @@
   <script type="module">
     import {GoogleGenerativeAI} from "https://esm.run/@google/generative-ai";
 
-    // Load API key from localStorage
-    let API_KEY = localStorage.getItem("JAR_GPT_API_KEY") || "";
-    const apiKeyInput = document.getElementById("apiKeyInput");
-    const apiKeyForm = document.getElementById("apiKeyForm");
-    if(API_KEY) apiKeyInput.value = API_KEY;
+    // ---------- Config ----------
+    const LOCAL_API_KEY_KEY = "JAR_GPT_API_KEY";
+    const LOCAL_HISTORY_KEY = "JAR_GPT_CHAT_HISTORY";
+    // When sending history as context to the model, limit size to avoid huge requests.
+    const HISTORY_CHAR_LIMIT = 8000; // adjust as needed
+    // Limit number of messages restored visually to avoid flooding the DOM on load (older messages still in history).
+    const VISUAL_RESTORE_LIMIT = 100;
 
-    apiKeyForm.addEventListener("submit", e => {
-      e.preventDefault();
-      const key = apiKeyInput.value.trim();
-      if(key){
-        API_KEY = key;
-        localStorage.setItem("JAR_GPT_API_KEY", key);
-        alert("API key saved!");
-        location.reload(); // reload to apply new key
-      } else {
-        alert("API key cannot be empty.");
-      }
-    });
-
-    const genAI = new GoogleGenerativeAI(API_KEY);
-
+    // ---------- Firebase (unchanged) ----------
     const firebaseConfig = {
       apiKey:"AIzaSyApsou3Oe3GVBBHevhDEKLvGN0qAIBVPKU",
       authDomain:"jargpt-29ae0.firebaseapp.com",
@@ -203,6 +203,40 @@
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
 
+    // ---------- DOM ----------
+    const apiKeyInput = document.getElementById("apiKeyInput");
+    const apiKeyForm = document.getElementById("apiKeyForm");
+    const chat = document.getElementById("chat");
+    const promptEl = document.getElementById("prompt");
+    const sendBtn = document.getElementById("sendBtn");
+    const rpmEl = document.getElementById("rpm");
+    const rpdEl = document.getElementById("rpd");
+    const clearHistoryBtn = document.getElementById("clearHistory");
+    const exportHistoryBtn = document.getElementById("exportHistory");
+    const importHistoryBtn = document.getElementById("importHistoryBtn");
+
+    // ---------- API key ----------
+    let API_KEY = localStorage.getItem(LOCAL_API_KEY_KEY) || "";
+    if(API_KEY) apiKeyInput.value = API_KEY;
+
+    apiKeyForm.addEventListener("submit", e => {
+      e.preventDefault();
+      const key = apiKeyInput.value.trim();
+      if(key){
+        API_KEY = key;
+        localStorage.setItem(LOCAL_API_KEY_KEY, key);
+        alert("API key saved!");
+        // re-initialize generator if needed by reloading the page to avoid reimport complexity
+        location.reload();
+      } else {
+        alert("API key cannot be empty.");
+      }
+    });
+
+    // ---------- Generative client ----------
+    const genAI = new GoogleGenerativeAI(API_KEY);
+
+    // ---------- Usage counters ----------
     const pad=n=>String(n).padStart(2,'0');
     function minuteKey(d=new Date()){return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+pad(d.getHours())+pad(d.getMinutes());}
     function dayKey(d=new Date()){return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate());}
@@ -211,30 +245,65 @@
     async function readValue(path){const s=await db.ref(path).get();return s.exists()?s.val():0;}
 
     async function refreshCounters(){
-      const m=minuteKey(),d=dayKey();
-      const rpm=await readValue(`/usage/requests/byMinute/${m}`);
-      const rpd=await readValue(`/usage/requests/byDay/${d}`);
-      rpmEl.textContent=`${rpm} / 15`;
-      rpdEl.textContent=`${rpd} / 200`;
+      try{
+        const m=minuteKey(),d=dayKey();
+        const rpm=await readValue(`/usage/requests/byMinute/${m}`);
+        const rpd=await readValue(`/usage/requests/byDay/${d}`);
+        rpmEl.textContent=`${rpm} / 15`;
+        rpdEl.textContent=`${rpd} / 200`;
+      }catch(e){ console.warn("Failed to refresh counters", e); }
     }
-    setInterval(refreshCounters,5000);refreshCounters();
+    setInterval(refreshCounters,5000); refreshCounters();
 
-    const chat=document.getElementById('chat');
-    const promptEl=document.getElementById('prompt');
-    const sendBtn=document.getElementById('sendBtn');
-    const rpmEl=document.getElementById('rpm');
-    const rpdEl=document.getElementById('rpd');
+    // ---------- Chat persistence ----------
+    // Each entry: {role: "user" | "assistant", text: "...", ts: 1670123456789}
+    let chatHistory = JSON.parse(localStorage.getItem(LOCAL_HISTORY_KEY) || "[]");
 
-    function addBubble(content,isUser){
+    function persistHistory(){
+      try{
+        localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(chatHistory));
+      }catch(e){
+        console.error("Failed to persist history", e);
+      }
+    }
+
+    function clearHistory(){
+      chatHistory = [];
+      persistHistory();
+      renderAllMessages();
+    }
+
+    // Restore a limited number visually
+    function renderAllMessages(){
+      chat.innerHTML = "";
+      const slice = chatHistory.slice(-VISUAL_RESTORE_LIMIT);
+      slice.forEach(entry => addBubble(entry.text, entry.role === "user", false));
+      // scroll to bottom
+      setTimeout(()=>{ chat.lastElementChild && chat.lastElementChild.scrollIntoView({behavior:'auto'}); }, 50);
+    }
+
+    // Add bubble to UI. By default saves to history unless saveToHistory === false
+    function addBubble(content, isUser=true, saveToHistory=true){
       const wrap=document.createElement('div');
       wrap.className='msg '+(isUser?'user':'bot');
+      const avatar = isUser ? '👤' : '🤖';
+      const safeContent = typeof content === "string" ? content : String(content);
       wrap.innerHTML=`
-        <div class="avatar">${isUser?'👤':'🤖'}</div>
-        <div class="bubble">${content}</div>`;
+        <div class="avatar">${avatar}</div>
+        <div class="bubble">${safeContent}</div>`;
       chat.appendChild(wrap);
       wrap.scrollIntoView({behavior:'smooth'});
+      if(saveToHistory){
+        chatHistory.push({ role: isUser ? "user" : "assistant", text: content, ts: Date.now() });
+        // keep history size reasonable (trim oldest if huge)
+        if(chatHistory.length > 2000) chatHistory = chatHistory.slice(-1500);
+        persistHistory();
+      }
+      // attach copy buttons if there are code blocks
+      addCopyButtons(wrap);
       return wrap.querySelector('.bubble');
     }
+
     function addThinking(){
       const wrap=document.createElement('div');
       wrap.className='msg bot';
@@ -248,64 +317,181 @@
       return wrap;
     }
 
-    async function send(){
-      if(!API_KEY){alert("Please enter your API key first."); return;}
-      const text=promptEl.value.trim();
-      if(!text)return;
-      addBubble(text,true);
-      promptEl.value='';
-      sendBtn.disabled=true;
-
-      const think=addThinking();
-
-      const mk=minuteKey(),dk=dayKey();
-      try{
-        await increment(`/usage/requests/byMinute/${mk}`,1);
-        await increment(`/usage/requests/byDay/${dk}`,1);
-      }catch(e){console.error(e)}
-
-      try{
-        const model=genAI.getGenerativeModel({model:'gemini-2.5-flash-lite'});
-        const result=await model.generateContent(text);
-        const reply=await result.response.text();
-        think.remove();
-        const bubble=addBubble('',false);
-        bubble.innerHTML=renderMarkdown(reply);
-        addCopyButtons(bubble);
-      }catch(err){
-        think.remove();
-        addBubble('Error: '+err.message,false);
-      }
-      sendBtn.disabled=false;
-      refreshCounters();
+    // Copy buttons for code blocks inside bubbles (pre elements)
+    function addCopyButtons(parent){
+      parent.querySelectorAll('pre').forEach(pre=>{
+        if(pre.querySelector('.copy')) return; // already has
+        const btn=document.createElement('button');
+        btn.className='copy';
+        btn.textContent='Copy';
+        btn.onclick=()=>{
+          navigator.clipboard.writeText(pre.textContent).then(()=>{
+            btn.textContent='Copied!';
+            setTimeout(()=>btn.textContent='Copy',1200);
+          }).catch(()=>{ btn.textContent='Copy'; });
+        };
+        pre.appendChild(btn);
+      });
     }
 
-    document.getElementById('inputArea').addEventListener('submit',e=>{e.preventDefault();send();});
-    promptEl.addEventListener('keydown',e=>{
-      if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}
-    });
-
-    function renderMarkdown(src){
-      return src
-        .replace(/```(\w+)?\n([\s\S]*?)```/g,(m,lang,code)=>
-          `<pre><code class="language-${lang||''}">${escapeHtml(code.trim())}</code><button class="copy">Copy</button></pre>`)
-        .replace(/`([^`]+)`/g,'<code>$1</code>')
-        .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-        .replace(/\*(.+?)\*/g,'<em>$1</em>');
-    }
+    // Sanitize/escape for simple markdown-like rendering
     function escapeHtml(str){
       return str.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
     }
-    function addCopyButtons(parent){
-      parent.querySelectorAll('pre').forEach(pre=>{
-        const btn=pre.querySelector('.copy');
-        btn.onclick=()=>{
-          navigator.clipboard.writeText(pre.querySelector('code').textContent);
-          btn.textContent='Copied!';
-          setTimeout(()=>btn.textContent='Copy',1200);
-        };
-      });
+
+    // Basic markdown-like renderer (keeps code blocks/pre, inline code, bold, italic)
+    function renderMarkdown(src){
+      if(!src) return '';
+      // protect HTML by escaping first
+      let s = escapeHtml(String(src));
+      // code blocks ```lang ... ```
+      s = s.replace(/```(\w+)?\n([\s\S]*?)```/g,(m,lang,code)=>
+        `<pre><code class="language-${lang||''}">${code.trim()}</code></pre>`);
+      // inline code
+      s = s.replace(/`([^`]+)`/g,'<code>$1</code>');
+      // bold
+      s = s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+      // italics
+      s = s.replace(/\*(.+?)\*/g,'<em>$1</em>');
+      // line breaks preserved by pre-wrap CSS
+      return s;
     }
+
+    // ---------- Initialize UI from localStorage ----------
+    renderAllMessages();
+
+    // ---------- Utilities to prepare context for the model ----------
+    function buildContextPrompt(userMessage){
+      // We'll send a concatenated context composed of the recent conversation, newest-first.
+      // Only include text, and try to keep under HISTORY_CHAR_LIMIT chars.
+      const parts = [];
+      // iterate from last to first and add until char limit reached
+      for(let i = chatHistory.length - 1; i >= 0; i--){
+        const e = chatHistory[i];
+        const role = e.role === "user" ? "User" : "Assistant";
+        const chunk = `${role}: ${e.text}\n`;
+        const currentLen = parts.join('').length + chunk.length + userMessage.length;
+        if(currentLen > HISTORY_CHAR_LIMIT) break;
+        parts.unshift(chunk); // keep chronological order
+      }
+      // final prompt: system/instruction + context + new user message
+      const systemMsg = "You are JAR GPT — a helpful assistant. Use the conversation history below for context.";
+      const contextText = parts.join('');
+      const final = `${systemMsg}\n\nConversation history:\n${contextText}\nUser: ${userMessage}\nAssistant:`;
+      return final;
+    }
+
+    // ---------- Send ----------
+
+    async function send(){
+      if(!API_KEY){alert("Please enter your API key first."); return;}
+      const text = promptEl.value.trim();
+      if(!text) return;
+
+      addBubble(text, true, true); // add user bubble and save
+      promptEl.value = '';
+      sendBtn.disabled = true;
+
+      const think = addThinking();
+
+      // increment usage (best-effort)
+      const mk = minuteKey(), dk = dayKey();
+      try{
+        await increment(`/usage/requests/byMinute/${mk}`,1);
+        await increment(`/usage/requests/byDay/${dk}`,1);
+      }catch(e){ console.warn("Usage increment failed", e); }
+
+      try{
+        // Build combined prompt including history (limited)
+        const combinedPrompt = buildContextPrompt(text);
+
+        const model = genAI.getGenerativeModel({model:'gemini-2.5-flash-lite'});
+
+        // NOTE: the simple generateContent(text) call is used in original; we pass combinedPrompt
+        const result = await model.generateContent(combinedPrompt);
+
+        // result.response may contain a stream-like body; earlier code used .response.text()
+        // We'll follow that pattern but wrap in try/catch
+        const reply = await result.response.text();
+
+        think.remove();
+
+        const bubble = addBubble('', false, true); // create bot bubble and save
+        // Render markdown into the bubble
+        bubble.innerHTML = renderMarkdown(reply);
+        addCopyButtons(bubble);
+
+      }catch(err){
+        think.remove();
+        const errMsg = (err && err.message) ? `Error: ${err.message}` : `An unknown error occurred.`;
+        addBubble(errMsg, false, true);
+        console.error(err);
+      }
+
+      sendBtn.disabled = false;
+      refreshCounters();
+    }
+
+    // Handle submit/send
+    document.getElementById('inputArea').addEventListener('submit', e => { e.preventDefault(); send(); });
+    promptEl.addEventListener('keydown', e => { if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); } });
+
+    // ---------- History controls ----------
+    clearHistoryBtn.addEventListener('click', () => {
+      if(confirm("Clear local chat history? This cannot be undone.")){
+        clearHistory();
+      }
+    });
+
+    exportHistoryBtn.addEventListener('click', () => {
+      const dataStr = JSON.stringify(chatHistory, null, 2);
+      const blob = new Blob([dataStr], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `jar_gpt_history_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+
+    importHistoryBtn.addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json';
+      input.onchange = async (ev) => {
+        const file = ev.target.files[0];
+        if(!file) return;
+        try{
+          const text = await file.text();
+          const parsed = JSON.parse(text);
+          if(!Array.isArray(parsed)) throw new Error("Invalid history format");
+          // Basic validation of items
+          const cleaned = parsed
+            .map(item => ({ role: item.role === 'user' ? 'user' : 'assistant', text: String(item.text || ''), ts: item.ts || Date.now() }))
+            .slice(-2000);
+          chatHistory = chatHistory.concat(cleaned).slice(-2000);
+          persistHistory();
+          renderAllMessages();
+          alert("Imported chat history.");
+        }catch(e){
+          alert("Failed to import history: " + e.message);
+        }
+      };
+      input.click();
+    });
+
+    // make sure copy buttons attach for restored messages
+    setTimeout(()=> addCopyButtons(document), 200);
+
+    // expose some debug helpers (optional)
+    window.JARGPT = {
+      getHistory: () => chatHistory.slice(),
+      clearHistory,
+      persistHistory
+    };
+
   </script>
 </body>
 </html>
