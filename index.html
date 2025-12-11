@@ -257,7 +257,8 @@
 
     // ---------- Chat persistence ----------
     // Each entry: {role: "user" | "assistant", text: "...", ts: 1670123456789}
-    let chatHistory = JSON.parse(localStorage.getItem(LOCAL_HISTORY_KEY) || "[]");
+    // Accept previous key name too for compatibility
+    let chatHistory = JSON.parse(localStorage.getItem(LOCAL_HISTORY_KEY) || localStorage.getItem("JAR_GPT_CHAT_HISTORY") || "[]");
 
     function persistHistory(){
       try{
@@ -273,11 +274,21 @@
       renderAllMessages();
     }
 
-    // Restore a limited number visually
+    // Restore a limited number visually, rendering bot messages as markdown
     function renderAllMessages(){
       chat.innerHTML = "";
       const slice = chatHistory.slice(-VISUAL_RESTORE_LIMIT);
-      slice.forEach(entry => addBubble(entry.text, entry.role === "user", false));
+      slice.forEach(entry => {
+        if(entry.role === "user"){
+          // user messages: escape to avoid raw HTML injection
+          addBubble(entry.text, true, false);
+        } else {
+          // bot messages: render markdown so code blocks and formatting show correctly
+          const bubble = addBubble('', false, false);
+          bubble.innerHTML = renderMarkdown(entry.text);
+          addCopyButtons(bubble);
+        }
+      });
       // scroll to bottom
       setTimeout(()=>{ chat.lastElementChild && chat.lastElementChild.scrollIntoView({behavior:'auto'}); }, 50);
     }
@@ -287,7 +298,8 @@
       const wrap=document.createElement('div');
       wrap.className='msg '+(isUser?'user':'bot');
       const avatar = isUser ? '👤' : '🤖';
-      const safeContent = typeof content === "string" ? content : String(content);
+      // escape user content here; bot content should be set via renderMarkdown after creation
+      const safeContent = isUser ? escapeHtml(String(content)) : (typeof content === "string" ? content : String(content));
       wrap.innerHTML=`
         <div class="avatar">${avatar}</div>
         <div class="bubble">${safeContent}</div>`;
@@ -382,7 +394,6 @@
     }
 
     // ---------- Send ----------
-
     async function send(){
       if(!API_KEY){alert("Please enter your API key first."); return;}
       const text = promptEl.value.trim();
@@ -416,8 +427,8 @@
 
         think.remove();
 
-        const bubble = addBubble('', false, true); // create bot bubble and save
-        // Render markdown into the bubble
+        // create bot bubble, save raw reply to history, then render markdown inside
+        const bubble = addBubble('', false, true); // this will save {role: assistant, text: reply}
         bubble.innerHTML = renderMarkdown(reply);
         addCopyButtons(bubble);
 
