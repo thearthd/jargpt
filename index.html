@@ -33,10 +33,30 @@
       align-items:center;
       justify-content:space-between;
       border-bottom:1px solid rgba(255,255,255,.1);
+      gap:12px;
     }
     header h1{font-size:18px;font-weight:600;margin:0;}
     .limits{display:flex;gap:20px;font-size:13px;color:var(--subtle);}
     .limits span{color:#fff;font-weight:600;}
+    #apiKeyForm{display:flex;align-items:center;gap:6px;}
+    #apiKeyForm input{
+      padding:4px 8px;
+      font-size:13px;
+      border-radius:6px;
+      border:1px solid rgba(255,255,255,.2);
+      background:var(--bg);
+      color:var(--text);
+      width:200px;
+    }
+    #apiKeyForm button{
+      background:var(--accent);
+      border:none;
+      border-radius:6px;
+      padding:4px 8px;
+      cursor:pointer;
+      color:#fff;
+      font-size:13px;
+    }
 
     #chat{
       flex:1;
@@ -130,6 +150,10 @@
       <div>RPM: <span id="rpm">— / 15</span></div>
       <div>RPD: <span id="rpd">— / 200</span></div>
     </div>
+    <form id="apiKeyForm">
+      <input type="password" id="apiKeyInput" placeholder="Enter API Key" />
+      <button type="submit">Save</button>
+    </form>
   </header>
 
   <main id="chat"></main>
@@ -143,137 +167,145 @@
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
-<script type="module">
-  import {GoogleGenerativeAI} from "https://esm.run/@google/generative-ai";
+  <script type="module">
+    import {GoogleGenerativeAI} from "https://esm.run/@google/generative-ai";
 
-  // Load API key from localStorage, or ask user to input it
-  let API_KEY = localStorage.getItem("JAR_GPT_API_KEY") || "";
-  if (!API_KEY) {
-    API_KEY = prompt("Enter your Google Generative AI API key:");
-    if (API_KEY) {
-      localStorage.setItem("JAR_GPT_API_KEY", API_KEY);
-    } else {
-      alert("No API key provided. JAR GPT will not work.");
-    }
-  }
+    // Load API key from localStorage
+    let API_KEY = localStorage.getItem("JAR_GPT_API_KEY") || "";
+    const apiKeyInput = document.getElementById("apiKeyInput");
+    const apiKeyForm = document.getElementById("apiKeyForm");
+    if(API_KEY) apiKeyInput.value = API_KEY;
 
-  const genAI = new GoogleGenerativeAI(API_KEY);
-
-  const firebaseConfig = {
-    apiKey:"AIzaSyApsou3Oe3GVBBHevhDEKLvGN0qAIBVPKU",
-    authDomain:"jargpt-29ae0.firebaseapp.com",
-    databaseURL:"https://jargpt-29ae0-default-rtdb.firebaseio.com",
-    projectId:"jargpt-29ae0",
-    storageBucket:"jargpt-29ae0.firebasestorage.app",
-    messagingSenderId:"869559466658",
-    appId:"1:869559466658:web:69c74443cee135ff7ff5fb"
-  };
-  firebase.initializeApp(firebaseConfig);
-  const db = firebase.database();
-
-  const pad=n=>String(n).padStart(2,'0');
-  function minuteKey(d=new Date()){return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+pad(d.getHours())+pad(d.getMinutes());}
-  function dayKey(d=new Date()){return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate());}
-
-  async function increment(path,d=1){return db.ref(path).transaction(v=>(v||0)+d);}
-  async function readValue(path){const s=await db.ref(path).get();return s.exists()?s.val():0;}
-
-  async function refreshCounters(){
-    const m=minuteKey(),d=dayKey();
-    const rpm=await readValue(`/usage/requests/byMinute/${m}`);
-    const rpd=await readValue(`/usage/requests/byDay/${d}`);
-    rpmEl.textContent=`${rpm} / 15`;
-    rpdEl.textContent=`${rpd} / 200`;
-  }
-  setInterval(refreshCounters,5000);refreshCounters();
-
-  const chat=document.getElementById('chat');
-  const promptEl=document.getElementById('prompt');
-  const sendBtn=document.getElementById('sendBtn');
-  const rpmEl=document.getElementById('rpm');
-  const rpdEl=document.getElementById('rpd');
-
-  function addBubble(content,isUser){
-    const wrap=document.createElement('div');
-    wrap.className='msg '+(isUser?'user':'bot');
-    wrap.innerHTML=`
-      <div class="avatar">${isUser?'👤':'🤖'}</div>
-      <div class="bubble">${content}</div>`;
-    chat.appendChild(wrap);
-    wrap.scrollIntoView({behavior:'smooth'});
-    return wrap.querySelector('.bubble');
-  }
-  function addThinking(){
-    const wrap=document.createElement('div');
-    wrap.className='msg bot';
-    wrap.innerHTML=`
-      <div class="avatar">🤖</div>
-      <div class="thinking">
-        <span></span><span></span><span></span>
-      </div>`;
-    chat.appendChild(wrap);
-    wrap.scrollIntoView({behavior:'smooth'});
-    return wrap;
-  }
-
-  async function send(){
-    const text=promptEl.value.trim();
-    if(!text)return;
-    addBubble(text,true);
-    promptEl.value='';
-    sendBtn.disabled=true;
-
-    const think=addThinking();
-
-    const mk=minuteKey(),dk=dayKey();
-    try{
-      await increment(`/usage/requests/byMinute/${mk}`,1);
-      await increment(`/usage/requests/byDay/${dk}`,1);
-    }catch(e){console.error(e)}
-
-    try{
-      const model=genAI.getGenerativeModel({model:'gemini-2.0-flash'});
-      const result=await model.generateContent(text);
-      const reply=await result.response.text();
-      think.remove();
-      const bubble=addBubble('',false);
-      bubble.innerHTML=renderMarkdown(reply);
-      addCopyButtons(bubble);
-    }catch(err){
-      think.remove();
-      addBubble('Error: '+err.message,false);
-    }
-    sendBtn.disabled=false;
-    refreshCounters();
-  }
-
-  document.getElementById('inputArea').addEventListener('submit',e=>{e.preventDefault();send();});
-  promptEl.addEventListener('keydown',e=>{
-    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}
-  });
-
-  function renderMarkdown(src){
-    return src
-      .replace(/```(\w+)?\n([\s\S]*?)```/g,(m,lang,code)=>
-        `<pre><code class="language-${lang||''}">${escapeHtml(code.trim())}</code><button class="copy">Copy</button></pre>`)
-      .replace(/`([^`]+)`/g,'<code>$1</code>')
-      .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-      .replace(/\*(.+?)\*/g,'<em>$1</em>');
-  }
-  function escapeHtml(str){
-    return str.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-  }
-  function addCopyButtons(parent){
-    parent.querySelectorAll('pre').forEach(pre=>{
-      const btn=pre.querySelector('.copy');
-      btn.onclick=()=>{
-        navigator.clipboard.writeText(pre.querySelector('code').textContent);
-        btn.textContent='Copied!';
-        setTimeout(()=>btn.textContent='Copy',1200);
-      };
+    apiKeyForm.addEventListener("submit", e => {
+      e.preventDefault();
+      const key = apiKeyInput.value.trim();
+      if(key){
+        API_KEY = key;
+        localStorage.setItem("JAR_GPT_API_KEY", key);
+        alert("API key saved!");
+        location.reload(); // reload to apply new key
+      } else {
+        alert("API key cannot be empty.");
+      }
     });
-  }
-</script>
 
+    const genAI = new GoogleGenerativeAI(API_KEY);
+
+    const firebaseConfig = {
+      apiKey:"AIzaSyApsou3Oe3GVBBHevhDEKLvGN0qAIBVPKU",
+      authDomain:"jargpt-29ae0.firebaseapp.com",
+      databaseURL:"https://jargpt-29ae0-default-rtdb.firebaseio.com",
+      projectId:"jargpt-29ae0",
+      storageBucket:"jargpt-29ae0.firebasestorage.app",
+      messagingSenderId:"869559466658",
+      appId:"1:869559466658:web:69c74443cee135ff7ff5fb"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const pad=n=>String(n).padStart(2,'0');
+    function minuteKey(d=new Date()){return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+pad(d.getHours())+pad(d.getMinutes());}
+    function dayKey(d=new Date()){return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate());}
+
+    async function increment(path,d=1){return db.ref(path).transaction(v=>(v||0)+d);}
+    async function readValue(path){const s=await db.ref(path).get();return s.exists()?s.val():0;}
+
+    async function refreshCounters(){
+      const m=minuteKey(),d=dayKey();
+      const rpm=await readValue(`/usage/requests/byMinute/${m}`);
+      const rpd=await readValue(`/usage/requests/byDay/${d}`);
+      rpmEl.textContent=`${rpm} / 15`;
+      rpdEl.textContent=`${rpd} / 200`;
+    }
+    setInterval(refreshCounters,5000);refreshCounters();
+
+    const chat=document.getElementById('chat');
+    const promptEl=document.getElementById('prompt');
+    const sendBtn=document.getElementById('sendBtn');
+    const rpmEl=document.getElementById('rpm');
+    const rpdEl=document.getElementById('rpd');
+
+    function addBubble(content,isUser){
+      const wrap=document.createElement('div');
+      wrap.className='msg '+(isUser?'user':'bot');
+      wrap.innerHTML=`
+        <div class="avatar">${isUser?'👤':'🤖'}</div>
+        <div class="bubble">${content}</div>`;
+      chat.appendChild(wrap);
+      wrap.scrollIntoView({behavior:'smooth'});
+      return wrap.querySelector('.bubble');
+    }
+    function addThinking(){
+      const wrap=document.createElement('div');
+      wrap.className='msg bot';
+      wrap.innerHTML=`
+        <div class="avatar">🤖</div>
+        <div class="thinking">
+          <span></span><span></span><span></span>
+        </div>`;
+      chat.appendChild(wrap);
+      wrap.scrollIntoView({behavior:'smooth'});
+      return wrap;
+    }
+
+    async function send(){
+      if(!API_KEY){alert("Please enter your API key first."); return;}
+      const text=promptEl.value.trim();
+      if(!text)return;
+      addBubble(text,true);
+      promptEl.value='';
+      sendBtn.disabled=true;
+
+      const think=addThinking();
+
+      const mk=minuteKey(),dk=dayKey();
+      try{
+        await increment(`/usage/requests/byMinute/${mk}`,1);
+        await increment(`/usage/requests/byDay/${dk}`,1);
+      }catch(e){console.error(e)}
+
+      try{
+        const model=genAI.getGenerativeModel({model:'gemini-2.0-flash'});
+        const result=await model.generateContent(text);
+        const reply=await result.response.text();
+        think.remove();
+        const bubble=addBubble('',false);
+        bubble.innerHTML=renderMarkdown(reply);
+        addCopyButtons(bubble);
+      }catch(err){
+        think.remove();
+        addBubble('Error: '+err.message,false);
+      }
+      sendBtn.disabled=false;
+      refreshCounters();
+    }
+
+    document.getElementById('inputArea').addEventListener('submit',e=>{e.preventDefault();send();});
+    promptEl.addEventListener('keydown',e=>{
+      if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}
+    });
+
+    function renderMarkdown(src){
+      return src
+        .replace(/```(\w+)?\n([\s\S]*?)```/g,(m,lang,code)=>
+          `<pre><code class="language-${lang||''}">${escapeHtml(code.trim())}</code><button class="copy">Copy</button></pre>`)
+        .replace(/`([^`]+)`/g,'<code>$1</code>')
+        .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g,'<em>$1</em>');
+    }
+    function escapeHtml(str){
+      return str.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+    function addCopyButtons(parent){
+      parent.querySelectorAll('pre').forEach(pre=>{
+        const btn=pre.querySelector('.copy');
+        btn.onclick=()=>{
+          navigator.clipboard.writeText(pre.querySelector('code').textContent);
+          btn.textContent='Copied!';
+          setTimeout(()=>btn.textContent='Copy',1200);
+        };
+      });
+    }
+  </script>
 </body>
 </html>
