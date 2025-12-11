@@ -265,7 +265,7 @@
       }catch(e){console.error(e)}
 
       try{
-        const model=genAI.getGenerativeModel({model:'gemini-2.0-flash'});
+        const model=genAI.getGenerativeModel({model:'gemini-2.5-flash-lite'});
         const result=await model.generateContent(text);
         const reply=await result.response.text();
         think.remove();
